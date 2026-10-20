@@ -282,7 +282,12 @@ def main():
     if not MODEL:
         logging.warning("OPENROUTER_MODEL is not configured.")
 
-    app = Application.builder().token(TOKEN).build()
+app = (
+    Application.builder()
+    .token(TOKEN)
+    .drop_pending_updates(True)
+    .build()
+)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("characters", characters))
