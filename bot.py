@@ -11,6 +11,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.error import NetworkError, TimedOut, RetryAfter
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -41,6 +42,7 @@ client = (
 # Separate, temporary conversation histories for each user and character.
 histories = {}
 active_characters = {}
+
 MAX_HISTORY_MESSAGES = 30
 MAX_CONTEXT_MESSAGES = 16
 
@@ -79,14 +81,17 @@ CHARACTERS = {
     },
 }
 
+
 def get_character(user_id):
     return active_characters.get(user_id, "mira")
+
 
 def get_history(user_id, character):
     key = (user_id, character)
     if key not in histories:
         histories[key] = []
     return histories[key]
+
 
 def character_keyboard():
     buttons = []
@@ -104,6 +109,7 @@ def character_keyboard():
         buttons.append(row)
     return InlineKeyboardMarkup(buttons)
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or "there"
     await update.message.reply_text(
@@ -117,11 +123,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=character_keyboard(),
     )
 
+
 async def characters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Choose your companion:",
         reply_markup=character_keyboard(),
     )
+
 
 async def select_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -137,6 +145,7 @@ async def select_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Send a message to start chatting."
     )
 
+
 async def switch_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key = update.message.text.split("@")[0][1:].lower()
     if key not in CHARACTERS:
@@ -148,6 +157,7 @@ async def switch_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Switched to {character['emoji']} {character['name']}!"
     )
 
+
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     character = get_character(user_id)
@@ -155,6 +165,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Chat history for {CHARACTERS[character]['name']} cleared."
     )
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -168,6 +179,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reset - Clear current conversation\n"
         "/help - Show this help"
     )
+
 
 def generate_reply(system_prompt, history, user_text):
     """Make a synchronous OpenRouter request; called in a worker thread."""
@@ -187,6 +199,7 @@ def generate_reply(system_prompt, history, user_text):
         max_tokens=700,
     )
     return (response.choices[0].message.content or "").strip()
+
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -209,7 +222,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     system_prompt = f"""
 You are {character['name']}, a highly engaging, adult AI companion in a private 18+ roleplay chat.
 Personality: {character['personality']}
-
 Rules:
 - You are allowed and encouraged to be flirty, seductive, romantic, and sexually explicit when the user leads in that direction.
 - Speak naturally like a real person — use short, emotional, and immersive replies.
@@ -272,6 +284,25 @@ Rules:
             )
         await update.message.reply_text(message)
 
+
+# ==================== ERROR HANDLER ====================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle network and other errors gracefully."""
+    error = context.error
+
+    if isinstance(error, (NetworkError, TimedOut)):
+        # Temporary Bad Gateway / network issues – just log quietly
+        logging.warning(f"Network error (will retry): {error}")
+        return
+
+    if isinstance(error, RetryAfter):
+        logging.warning(f"Flood control: retry after {error.retry_after} seconds")
+        return
+
+    # Log unexpected errors
+    logging.error(f"Unexpected error: {error}", exc_info=error)
+
+
 def main():
     if not TOKEN:
         raise SystemExit(
@@ -282,13 +313,17 @@ def main():
     if not MODEL:
         logging.warning("OPENROUTER_MODEL is not configured.")
 
-app = (
-    Application.builder()
-    .token(TOKEN)
-    .drop_pending_updates(True)
-    .build()
-)
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .drop_pending_updates(True)
+        .build()
+    )
 
+    # Register error handler
+    app.add_error_handler(error_handler)
+
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("characters", characters))
     app.add_handler(CommandHandler("help", help_command))
@@ -301,7 +336,18 @@ app = (
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
     logging.info("Lucid AI is starting...")
-    app.run_polling()
+
+    # More resilient polling settings
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"],
+        timeout=30,
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=30,
+        pool_timeout=30,
+    )
+
 
 if __name__ == "__main__":
     main()
